@@ -27,7 +27,7 @@ bay_cap = 40  # 每个贝位容量(不管单贝还是两个连续贝都只能放
 block_bays_num = 40  # 每个箱区的贝位数
 
 # 箱区布局：4行×4列
-rows, cols = 5, 5
+rows, cols = 6, 6
 total_blocks = rows * cols  # 16个箱区
 blocks = list(range(1, total_blocks + 1))
 
@@ -89,12 +89,12 @@ class AllocationGroup:
 vessel_info = {
     'SHIP1': {'cycle_days': 7, 'berth': 'V1', 'start_time_step': 1},  # 周期 7 天，10 个 period，每个 period 保 5 个 subblocks
     'SHIP2': {'cycle_days': 10, 'berth': 'V1', 'start_time_step': 4},  # 周期 10 天，7 个 period
-    # 'SHIP3': {'cycle_days': 7, 'berth': 'V1', 'start_time_step': 6},  # 周期 14 天，5 个 period
+    'SHIP3': {'cycle_days': 7, 'berth': 'V1', 'start_time_step': 6},  # 周期 14 天，5 个 period
     'SHIP4': {'cycle_days': 7, 'berth': 'V2', 'start_time_step': 3},
     'SHIP5': {'cycle_days': 10, 'berth': 'V2', 'start_time_step': 5},
-    # 'SHIP6': {'cycle_days': 14, 'berth': 'V3', 'start_time_step': 2},
-    'SHIP7': {'cycle_days': 7, 'berth': 'V3', 'start_time_step': 1},
-    # 'SHIP8': {'cycle_days': 10, 'berth': 'V4', 'start_time_step': 1},
+    'SHIP6': {'cycle_days': 14, 'berth': 'V3', 'start_time_step': 1},
+    'SHIP7': {'cycle_days': 7, 'berth': 'V3', 'start_time_step': 4},
+    'SHIP8': {'cycle_days': 10, 'berth': 'V4', 'start_time_step': 1},
     'SHIP9': {'cycle_days': 7, 'berth': 'V4', 'start_time_step': 3},
 
 }
@@ -690,12 +690,12 @@ class YardSolver:
             m = gp.Model(f"window_{window_start}_{window_end}")
             # 可选：当窗口较大可能需要更多时间限制，这里用你已有设置，或重新设置
             m.Params.OutputFlag = 1
-            m.Params.TimeLimit = 500
+            m.Params.TimeLimit = 800
             m.Params.MIPGap = 0.03
             # 性能优化
             m.Params.Threads = 3  # 使用所有核心
             m.Params.MIPFocus = 1  # 优先找可行解
-            m.Params.Heuristics = 0.1  # 10% 时间用于启发式
+            m.Params.Heuristics = 0.2  # 10% 时间用于启发式
 
 
 
