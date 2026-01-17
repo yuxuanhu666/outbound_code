@@ -80,7 +80,7 @@ for block_id in sorted(blocks_info.keys()):
 blocks = list(blocks_info.keys())
 bay_cap_by_block = {b: info['bay_cap'] for b, info in blocks_info.items()}          # col*tier
 block_bays_num_by_block = {b: info['bay_count'] for b, info in blocks_info.items()} # bay_count
-
+#
 block_positions = {
     block_id: (
         info['block_position']['centerX'],
