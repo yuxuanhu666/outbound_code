@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.widgets import Slider
 from collections import defaultdict
+from 
 import math
 import pandas as pd
 # 颜色帮助：按 group_id 映射固定颜色
@@ -14,18 +15,6 @@ import matplotlib.cm as cm
 class InteractiveYardVisualizer:
     """
     交互式箱区可视化类（缩略图 + Slider + 点击弹出单区详情）
-    用法示例：
-        viz = InteractiveYardVisualizer(
-            all_assignments=all_assignments,
-            allocation_groups=allocation_groups,
-            rows=3, cols=4,
-            block_bays_num=40,
-            bay_cap=30,
-            T=72,
-            window_size=6,
-            figsize=(12,9)
-        )
-        viz.show()
     参数说明：
         - all_assignments: list[dict] 或 pandas.DataFrame，每条至少包含:
               {'group_id','block','bp' (tuple/list),'qty','size','pickup_step'}
@@ -47,33 +36,56 @@ class InteractiveYardVisualizer:
                  bay_cap,
                  T,
                  window_size,
-                 figsize=(12,9)):
+                 blocks=None,
+                 figsize=(12,9),
+                 planning_start_time=None,   # NEW
+                 step_hours =None
+                 ):
         self.all_assignments = self._ensure_list_of_dicts(all_assignments)
         self.allocation_groups = allocation_groups
+        # ✅使用真实 blocks（否则就从结果里推）
+        if blocks is None:
+            blocks = sorted({r["block"] for r in self.all_assignments})
+        self.blocks = list(blocks)
+
         self.rows = rows
         self.cols = cols
-        self.block_bays_num = block_bays_num
-        self.bay_cap = bay_cap
+
+        # ✅把 bays/cap 统一成 “每箱区一个值”
+        if isinstance(block_bays_num, dict):
+            self.block_bays_num_by_block = {b: int(block_bays_num[b]) for b in self.blocks}
+            self.default_block_bays_num = max(
+                self.block_bays_num_by_block.values()) if self.block_bays_num_by_block else 40
+        else:
+            self.block_bays_num_by_block = {b: int(block_bays_num) for b in self.blocks}
+            self.default_block_bays_num = int(block_bays_num)
+
+        if isinstance(bay_cap, dict):
+            self.bay_cap_by_block = {b: int(bay_cap[b]) for b in self.blocks}
+            self.default_bay_cap = max(self.bay_cap_by_block.values()) if self.bay_cap_by_block else 30
+        else:
+            self.bay_cap_by_block = {b: int(bay_cap) for b in self.blocks}
+            self.default_bay_cap = int(bay_cap)
+
         self.T = T
         self.window_size = window_size
         self.figsize = figsize
+
+        # NEW: 用于把 step 映射到真实时间
+        self.planning_start_dt = pd.to_datetime(planning_start_time) if planning_start_time else None
+        self.step_hours = float(step_hours)
 
         # 预计算 windows 与 assign_to_window
         self.windows, self.assign_to_window = self._map_assignments_to_windows(self.all_assignments,
                                                                                self.allocation_groups,
                                                                                self.T,
                                                                                self.window_size)
-        # 为每个船舶分配固定颜色
-        all_ships = sorted({r.get('ship', 'UNKNOWN') for r in self.all_assignments})
-        ship_cmap = cm.get_cmap('tab20')
-        self.ship_color_map = {ship: ship_cmap(i % 20) for i, ship in enumerate(all_ships)}
-        self.ship_color_map['UNKNOWN'] = (0.8, 0.8, 0.8)  # 未知船舶用灰色
-
-
         # color map by group_id
         all_gids = sorted({r['group_id'] for r in self.all_assignments})
-        cmap = cm.get_cmap('tab20')
-        self.color_map = {gid: cmap(i % 20) for i, gid in enumerate(all_gids)}
+        palette = (list(cm.get_cmap('tab20').colors)
+                   + list(cm.get_cmap('tab20b').colors)
+                   + list(cm.get_cmap('tab20c').colors))
+        self.color_map = {gid: palette[i % len(palette)] for i, gid in enumerate(all_gids)}
 
         # 内部绘图状态
         self.fig = None
@@ -83,6 +95,27 @@ class InteractiveYardVisualizer:
         self.cid = None
 
     # ------------------ 静态 / 内部工具 ------------------
+    def _bay_count(self, block_id):
+        return int(self.block_bays_num_by_block.get(block_id, self.default_block_bays_num))
+
+    def _bay_cap(self, block_id):
+        return int(self.bay_cap_by_block.get(block_id, self.default_bay_cap))
+
+    def _window_time_str(self, ws, we):
+        """steps [ws,we] (含端点) -> 真实时间区间字符串"""
+        if self.planning_start_dt is None:
+            return None
+
+        # step i 覆盖: [start + (i-1)*H, start + i*H)
+        t0 = self.planning_start_dt + pd.Timedelta(hours=(ws - 1) * self.step_hours)
+        t1 = self.planning_start_dt + pd.Timedelta(hours=we * self.step_hours)
+
+        return f"{t0:%Y-%m-%d %H:%M}——{t1:%Y-%m-%d %H:%M}"
+
+    @staticmethod
+    def size_to_teu(size):
+        s = str(size) if size is not None else ""
+        return 2 if ("40" in s or "45" in s) else 1
     @staticmethod
     def _ensure_list_of_dicts(all_assignments):
         if isinstance(all_assignments, pd.DataFrame):
@@ -128,10 +161,15 @@ class InteractiveYardVisualizer:
         bay_occupancy_count = [0] * (block_bays_num + 1)
         bay_size_set = defaultdict(set)
 
+        def size_to_teu(size):
+            s = str(size) if size is not None else ""
+            return 2 if ("40" in s or "45" in s) else 1
+
         for r in recs:
             bp = tuple(r['bp'])
             qty = int(r.get('qty', 0))
             size = r.get('size')
+            teu_qty = qty * size_to_teu(size)
             bp_totals[bp] += qty
             bp_records[bp].append(r)
             i1, i2 = bp
@@ -147,8 +185,10 @@ class InteractiveYardVisualizer:
 
     # ------------------ 单区详细绘制 ------------------
     def _draw_block_detail(self, block_id, recs, figsize=(14,4)):
+        bay_count = self._bay_count(block_id)
+        bay_cap = self._bay_cap(block_id)
         bp_totals, bay_occ_count, bay_size_set, conflict_bays, overcap_bps, bp_records = \
-            self._detect_conflicts_in_block(recs, self.block_bays_num, self.bay_cap)
+            self._detect_conflicts_in_block(recs, bay_count, bay_cap)
 
         # 颜色按 group_id
         gids = sorted({r['group_id'] for r in recs})
@@ -156,11 +196,11 @@ class InteractiveYardVisualizer:
         color_map = {gid: cmap(i % 20) for i, gid in enumerate(gids)}
 
         fig, ax = plt.subplots(figsize=figsize)
-        ax.set_title(f"Block {block_id} 详细贝位分配（贝 1..{self.block_bays_num}）", fontsize=14)
-        ax.set_xlim(0.5, self.block_bays_num + 0.5)
+        ax.set_title(f"Block {block_id} 详细贝位分配（贝 1..{bay_count}）", fontsize=14)
+        ax.set_xlim(0.5, bay_count + 0.5)
         ax.set_ylim(0, 1.6)
-        ax.set_xticks(range(1, self.block_bays_num+1))
-        ax.set_xticklabels([str(2*i - 1) for i in range(1, self.block_bays_num + 1)])
+        ax.set_xticks(range(1, bay_count+1))
+        ax.set_xticklabels([str(2*i - 1) for i in range(1, bay_count + 1)])
         ax.set_xlabel("Bay index")
         ax.set_ylabel("占用高度 (按 qty / bay_cap 缩放；>1 表示超容)")
         ax.grid(axis='x', linestyle=':', linewidth=0.4)
@@ -174,7 +214,7 @@ class InteractiveYardVisualizer:
             width = (i2 - i1 + 1) * 0.9
             x = i1 - 0.45
             total_qty = sum(int(r['qty']) for r in rec_list)
-            heights = [int(r['qty']) / self.bay_cap for r in rec_list]
+            heights = [int(r['qty']) / bay_cap for r in rec_list]
             y0 = 0.0
             for r, h in zip(rec_list, heights):
                 gid = r['group_id']
@@ -185,7 +225,7 @@ class InteractiveYardVisualizer:
                     ax.text(x + width/2, y0 + h/2, f"{gid}\n{int(r['qty'])}", ha='center', va='center', fontsize=8, color='white')
                 y0 += h
             # 超容用红框标出
-            if total_qty > self.bay_cap:
+            if total_qty > bay_cap:
                 rect2 = patches.Rectangle((x, 0), width, y0, facecolor='none', edgecolor='red', linewidth=2)
                 ax.add_patch(rect2)
 
@@ -281,7 +321,13 @@ class InteractiveYardVisualizer:
     def _draw_overview(self, win_idx):
         self.current_win_idx = win_idx
         ws, we = self.windows[win_idx]
-        self.fig.suptitle(f"总体视图 — 窗口 {win_idx} : steps [{ws}, {we}]", fontsize=14)
+        time_str = self._window_time_str(ws, we)
+        if time_str:
+            title = f"{time_str}\n总体视图 — 窗口 {win_idx} : steps [{ws}, {we}]"
+        else:
+            title = f"总体视图 — 窗口 {win_idx} : steps [{ws}, {we}]"
+
+        self.fig.suptitle(title, fontsize=14)
 
         active_by_block = defaultdict(list)
         for idx in range(0, win_idx+1):
@@ -300,108 +346,26 @@ class InteractiveYardVisualizer:
             ax.set_xlim(0, 1)
             ax.set_ylim(0, 1)
             recs = active_by_block.get(b, [])
+            bay_count = self._bay_count(b)
+            bay_cap = self._bay_cap(b)
+            
             if not recs:
                 ax.add_patch(patches.Rectangle((0,0),1,1, facecolor=(0.95,0.95,0.95), edgecolor='k'))
                 ax.text(0.5, 0.5, "空", ha='center', va='center', fontsize=12)
-            # else:
-            #     _, bay_occ_count, _, conflict_bays, overcap_bps, _ = self._detect_conflicts_in_block(recs, self.block_bays_num, self.bay_cap)
-            #     occ_bays = sum(1 for i in range(1, self.block_bays_num+1) if bay_occ_count[i] > 0)
-            #     if conflict_bays:
-            #         bg = (1.0, 0.85, 0.85)
-            #     else:
-            #         frac = min(1.0, occ_bays / self.block_bays_num)
-            #         bg = (1-frac*0.6, 1-frac*0.6, 1.0 - frac*0.2)
-            #     ax.add_patch(patches.Rectangle((0,0),1,1, facecolor=bg, edgecolor='k'))
-            #     ax.text(0.5, 0.6, f"占贝: {occ_bays}/{self.block_bays_num}", ha='center', va='center', fontsize=10)
-            #     if conflict_bays:
-            #         ax.text(0.5, 0.35, f"冲突贝: {','.join(map(str, conflict_bays[:6]))}{'...' if len(conflict_bays)>6 else ''}", ha='center', va='center', color='red', fontsize=8)
-            #     if overcap_bps:
-            #         ax.text(0.5, 0.12, "超容 BP 存在", ha='center', va='center', color='red', fontsize=8)
             else:
-                # 统计该箱区中每个船舶的箱量（按TEU）
-                ship_teu = defaultdict(int)
-                for rec in recs:
-                    ship = rec.get('ship', 'UNKNOWN')
-                    qty = int(rec.get('qty', 0))
-                    size = rec.get('size', '20ft')
-                    # 转换为TEU
-                    teu_factor = 2 if ('40' in size or '45' in size) else 1
-                    ship_teu[ship] += qty * teu_factor
-
-                # 计算总容量（TEU）
-                total_capacity_teu = self.block_bays_num * self.bay_cap
-                total_used_teu = sum(ship_teu.values())
-
-                # 按船舶比例填充颜色
-                y_offset = 0.0
-                for ship, teu in sorted(ship_teu.items()):
-                    fill_ratio = teu / total_capacity_teu
-                    fill_height = fill_ratio
-
-                    color = self.ship_color_map.get(ship, (0.8, 0.8, 0.8))
-                    ax.add_patch(patches.Rectangle(
-                        (0, y_offset),
-                        1,
-                        fill_height,
-                        facecolor=color,
-                        edgecolor='none',
-                        alpha=0.7
-                    ))
-
-                    # 在色块中央显示船舶名称（如果高度足够）
-                    if fill_height > 0.08:
-                        ax.text(0.5, y_offset + fill_height / 2,
-                                f"{ship}\n{teu}TEU",
-                                ha='center', va='center',
-                                fontsize=7, color='white',
-                                weight='bold')
-
-                    y_offset += fill_height
-
-                # 未使用部分用白色填充
-                if y_offset < 1.0:
-                    ax.add_patch(patches.Rectangle(
-                        (0, y_offset),
-                        1,
-                        1.0 - y_offset,
-                        facecolor='white',
-                        edgecolor='none'
-                    ))
-
-                # 添加黑色边框
-                ax.add_patch(patches.Rectangle(
-                    (0, 0), 1, 1,
-                    facecolor='none',
-                    edgecolor='k',
-                    linewidth=1.5
-                ))
-
-                # 检测冲突
-                _, bay_occ_count, _, conflict_bays, overcap_bps, _ = \
-                    self._detect_conflicts_in_block(recs, self.block_bays_num, self.bay_cap)
-
-                # 显示利用率信息
-                utilization = min(100, (total_used_teu / total_capacity_teu) * 100)
-                info_text = f"{utilization:.0f}%"
-
-                # 如果有冲突，用红色边框警告
-                if conflict_bays or overcap_bps:
-                    ax.add_patch(patches.Rectangle(
-                        (0, 0), 1, 1,
-                        facecolor='none',
-                        edgecolor='red',
-                        linewidth=3
-                    ))
-                    info_text += "\n⚠冲突"
-
-                # 在右上角显示信息
-                ax.text(0.95, 0.95, info_text,
-                        ha='right', va='top',
-                        fontsize=8,
-                        bbox=dict(boxstyle='round,pad=0.3',
-                                  facecolor='white',
-                                  alpha=0.8,
-                                  edgecolor='gray'))
+                _, bay_occ_count, _, conflict_bays, overcap_bps, _ = self._detect_conflicts_in_block(recs, bay_count, bay_cap)
+                occ_bays = sum(1 for i in range(1, bay_count+1) if bay_occ_count[i] > 0)
+                if conflict_bays:
+                    bg = (1.0, 0.85, 0.85)
+                else:
+                    frac = min(1.0, occ_bays / bay_count)
+                    bg = (1-frac*0.6, 1-frac*0.6, 1.0 - frac*0.2)
+                ax.add_patch(patches.Rectangle((0,0),1,1, facecolor=bg, edgecolor='k'))
+                ax.text(0.5, 0.6, f"占贝: {occ_bays}/{bay_count}", ha='center', va='center', fontsize=10)
+                if conflict_bays:
+                    ax.text(0.5, 0.35, f"冲突贝: {','.join(map(str, conflict_bays[:6]))}{'...' if len(conflict_bays)>6 else ''}", ha='center', va='center', color='red', fontsize=8)
+                if overcap_bps:
+                    ax.text(0.5, 0.12, "超容 BP 存在", ha='center', va='center', color='red', fontsize=8)
 
     # ------------------ 事件回调 ------------------
     def _on_click(self, event):
@@ -432,11 +396,16 @@ class InteractiveYardVisualizer:
     def show(self):
         """创建主界面并显示（会阻塞直到关闭窗口）"""
         self.fig = plt.figure(figsize=self.figsize)
-        gs = self.fig.add_gridspec(self.rows, self.cols, wspace=0.5, hspace=0.5, top=0.92, bottom=0.12)
+        gs = self.fig.add_gridspec(self.rows, self.cols, wspace=0.5, hspace=0.5, top=0.88, bottom=0.12)
         self.axes = {}
+        idx =0
         for r in range(self.rows):
             for c in range(self.cols):
-                b = r * self.cols + c + 1
+                if idx >=len(self.blocks):
+                    break
+                b = self.blocks[idx]
+                idx += 1
+
                 ax = self.fig.add_subplot(gs[r, c])
                 self.axes[b] = ax
                 ax.set_title(f"Block {b}", fontsize=9)
@@ -451,25 +420,6 @@ class InteractiveYardVisualizer:
 
         # 初始绘制
         self._draw_overview(0)
-        # 添加船舶图例
-        from matplotlib.lines import Line2D
-        legend_elements = []
-        for ship in sorted(self.ship_color_map.keys()):
-            if ship != 'UNKNOWN':
-                legend_elements.append(
-                    Line2D([0], [0], marker='s', color='w',
-                           label=ship,
-                           markerfacecolor=self.ship_color_map[ship],
-                           markersize=10, alpha=0.7)
-                )
-
-        if legend_elements:
-            self.fig.legend(handles=legend_elements,
-                            loc='upper right',
-                            bbox_to_anchor=(0.98, 0.98),
-                            fontsize=8,
-                            title='船舶',
-                            framealpha=0.9)
 
         # 连接回调
         self.win_slider.on_changed(self._on_slider)
